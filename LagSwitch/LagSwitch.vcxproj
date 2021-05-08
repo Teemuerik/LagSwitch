@@ -116,12 +116,14 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)Dependencies\WinDivert\x64\</AdditionalLibraryDirectories>
       <AdditionalDependencies>WinDivert.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert64.sys" "$(OutDir)"</Command>
+      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert64.sys" "$(OutDir)" &amp;
+xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
     <PostBuildEvent>
-      <Message>Copies the required file to the output directory.</Message>
+      <Message>Copy the required files to the output directory.</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -166,12 +168,14 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)Dependencies\WinDivert\x64\</AdditionalLibraryDirectories>
       <AdditionalDependencies>WinDivert.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert64.sys" "$(OutDir)"</Command>
+      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert64.sys" "$(OutDir)" &amp;
+xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
     <PostBuildEvent>
-      <Message>Copies the required file to the output directory.</Message>
+      <Message>Copy the required files to the output directory.</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
