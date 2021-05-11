@@ -114,13 +114,13 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(SolutionDir)Dependencies\WinDivert\x64\</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)Dependencies\WinDivert\lib\</AdditionalLibraryDirectories>
       <AdditionalDependencies>WinDivert.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert64.sys" "$(OutDir)" &amp;
-xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\lib\WinDivert64.sys" "$(OutDir)" &amp;
+xcopy /y "$(SolutionDir)Dependencies\WinDivert\lib\WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copy the required files to the output directory.</Message>
@@ -166,13 +166,13 @@ xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert.dll" "$(OutDir)"</C
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(SolutionDir)Dependencies\WinDivert\x64\</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(SolutionDir)Dependencies\WinDivert\lib\</AdditionalLibraryDirectories>
       <AdditionalDependencies>WinDivert.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert64.sys" "$(OutDir)" &amp;
-xcopy /y "$(SolutionDir)Dependencies\WinDivert\x64\WinDivert.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y "$(SolutionDir)Dependencies\WinDivert\lib\WinDivert64.sys" "$(OutDir)" &amp;
+xcopy /y "$(SolutionDir)Dependencies\WinDivert\lib\WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copy the required files to the output directory.</Message>
