@@ -4,6 +4,7 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <list>
 #include "windivert.h"
 
 #define PROMPT_BEFORE_EXIT 1
@@ -213,29 +214,32 @@ private:
 
 	const char * _filter;
 
-	// A vector of tuples containing the pointers to the packet data and the receive time.
-	std::vector<PACKET_TIME_DATA> _packets;
+	// A list of elements containing the pointers to the packet data and the receive time.
+	std::list<PACKET_TIME_DATA> _packets;
 	std::mutex _packetMutex;
 
 	// Gets an array equal in size to the packet list,
 	// only containing the packets received more than the given latency ago.
 	// Returns the number of defined elements in the array.
 	// Pass in a stack allocated empty array of packet data, equal in size to the packet list.
+	// The caller should lock the packet mutex.
 	size_t _getPackets(PACKET_DATA * packetArray) {
 		TIME_DATA current_time = std::chrono::steady_clock::now();
 		size_t count = 0;
 		size_t packetIndex = 0;
 		// The packet list is always sorted from oldest to newest,
 		// since the most recent packets are appended to the end.
-		for (size_t i = 0; i < _packets.size(); ++i) {
+		for (PACKET_TIME_DATA elem : _packets) {
 			// Check if the packet is older than the given latency.
-			if (current_time - _packets[i].second > _latency) {
-				// If it is, add the packet to the packet array.
-				packetArray[count] = _packets[i].first;
+			if (current_time - elem.second > _latency) {
+				// If it is, add the packet to the packet array and remove the packet from the original list.
+				packetArray[count] = elem.first;
+				_packets.remove(elem);
+				// Increment the array packet count.
 				++count;
 			}
 			else {
-				// If it isn't, return the current added packet count.
+				// If it isn't, return the array packet count.
 				// The rest of the packets in the list will all be newer because of the ordering of the packets.
 				return count;
 			}
@@ -248,9 +252,10 @@ private:
 	bool _shouldDeactivate = false;
 	std::mutex _activationStateMutex;
 
+	unsigned int _receivedCount;
+	int _bufferedCount;
+
 	void _receiverLoop() {
-		static int packetCount = 0;
-		static std::mutex countMutex;
 		UINT currentSize = MAX_PACKET_LENGTH;
 		PVOID currentPacket;
 		WINDIVERT_ADDRESS * currentAddress;
@@ -301,34 +306,106 @@ private:
 					return;
 				}
 			}
-			// Add the received packet to the packet list.
-			{
-				std::lock_guard<std::mutex> lock(_packetMutex);
-				_packets.emplace_back(PACKET_DATA(currentPacket, currentAddress), std::chrono::steady_clock::now());
-			}
-			// Increment the received packet counter.
-			std::lock_guard<std::mutex> lock(countMutex);
-			packetCount += 1;
+			// Add the received packet to the packet list and increment the received packet counter.
+			std::lock_guard<std::mutex> lock(_packetMutex);
+			_packets.emplace_back(PACKET_DATA(currentPacket, currentAddress), std::chrono::steady_clock::now());
+			_receivedCount += 1;
+			_bufferedCount += 1;
 		}
 	}
 
+	unsigned int _sentCount;
+
 	void _senderLoop() {
-		static int packetCount = 0;
-		static std::mutex countMutex;
 		while (true) {
-			// Increment the sent packet counter.
-			std::lock_guard<std::mutex> lock(countMutex);
-			packetCount += 1;
+			{
+				std::lock_guard<std::mutex> lock(_packetMutex);
+
+				// TODO: Send the packets.
+				
+				_sentCount += 1;
+				_bufferedCount -= 1;
+				// Lock the activation state mutex for the duration of the deactivation check.
+				{
+					std::lock_guard<std::mutex> lock(_activationStateMutex);
+					// Check that the delayer isn't deactivating.
+					if (_shouldDeactivate) {
+						// If it is, close the thread.
+						sync_cout << "The sender thread is closing." << std::endl;
+						return;
+					}
+				}
+			}
 			// Sleep for the predefined amount before checking again.
 			std::this_thread::sleep_for(SENDER_SLEEP_TIME);
 		}
+	}
+
+	// Sleeps for a second and returns false if the thread should terminate.
+	// Checks thread deactivation status every 50 ms (20 times).
+	bool logSleepSecond() {
+		for (int i = 0; i < 20; ++i) {
+			{
+				std::lock_guard<std::mutex> lock(_activationStateMutex);
+				// Check that the delayer isn't deactivating.
+				if (_shouldDeactivate) {
+					// If it is, return false to close the thread.
+					sync_cout << "The logger wait function detected deactivation on "
+						<< i + 1 << ". cycle." << std::endl;
+					return false;
+				}
+			}
+			// Wait for 50 milliseconds.
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		return true;
 	}
 
 	std::thread _loggingThread;
 
 	// Logs information every second when the delayer is active.
 	void _loggingLoop() {
-		std::this_thread::sleep_for(std::chrono::seconds(1));
+		// The amount of received packets.
+		unsigned int received;
+		// The amount of sent packets.
+		unsigned int sent;
+		// The amount of packets in the buffer waiting to be sent.
+		unsigned int buffered;
+		while (true) {
+			{
+				{
+					// Lock the packet mutex for the duration of this block.
+					std::lock_guard<std::mutex> lock(_packetMutex);
+					received = _receivedCount;
+					_receivedCount = 0;
+					sent = _sentCount;
+					_sentCount = 0;
+					buffered = _bufferedCount;
+					_bufferedCount = 0;
+				}
+
+				// Log the data.
+				// In a normal situation, received = sent + buffered.
+				if (received == sent + buffered)
+					sync_cout << "Received: " << received << ", sent: " << sent << ", buffered: " << buffered << "." << std::endl;
+
+				// If packets were lost, the received count is greater than the sent and buffer counts combined.
+				else if (received > sent + buffered) {
+					sync_cout << "Packets lost: " << received - sent - buffered << "! Received: " << received << ", sent: " << sent << ", buffered: " << buffered << "." << std::endl;
+				}
+
+				// Other abnormal cases.
+				else {
+					sync_cout << "Abnormal values! Received: " << received << ", sent: " << sent << ", buffered: " << buffered << "." << std::endl;
+				}
+			}
+			// Wait for a second between logs.
+			if (!logSleepSecond()) {
+				// If the function returned false, terminate the thread.
+				sync_cout << "The logger thread is closing." << std::endl;
+				return;
+			}
+		}
 	}
 
 	// Starts the receiver, sender, and logger threads.
@@ -340,12 +417,15 @@ private:
 
 public:
 	Delayer(int port, long long latency) {
+		_receivedCount = 0;
+		_bufferedCount = 0;
+		_sentCount = 0;
 		_latency = std::chrono::milliseconds(latency);
 		_active = false;
 		// Create a filter that accepts outbound packets from the given local port.
 		_filter = ("outbound and localPort == " + std::to_string(port)).c_str();
-		// Initialize the packet vector.
-		_packets = std::vector<PACKET_TIME_DATA>();
+		// Initialize the packet list.
+		_packets = std::list<PACKET_TIME_DATA>();
 	}
 
 	~Delayer() {
@@ -390,7 +470,7 @@ public:
 	}
 
 	bool Deactivate() {
-
+		// Set the deactivation flag and wait for the receiver and sender threads to close.
 
 		bool success = WinDivertClose(_winDivertHandle);
 
