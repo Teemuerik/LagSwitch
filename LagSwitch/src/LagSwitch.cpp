@@ -49,9 +49,11 @@ Ping statistics for 142.250.184.238:
 Approximate round trip times in milli-seconds:
 	Minimum = 280ms, Maximum = 298ms, Average = 292ms
 */
-// Average latency difference = 261ms
-// Maximum latency difference = 270ms
-// Minimum latency difference = 241ms
+// Target latency           = 250ms
+// Sender thread sleep time = 10ms
+// Average latency          = 261ms
+// Maximum latency          = 270ms
+// Minimum latency          = 241ms
 
 #define LOG_THREAD_ACTIVITY 0
 
