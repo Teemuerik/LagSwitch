@@ -722,7 +722,7 @@ void BeepNote(Note note, int octave, double division) {
 	}
 	else {
 		DWORD noteFreq = GetNote(note, octave);
-		PRINT_TRACE("Playing " << noteFreq << " for " << noteLength << " ms.");
+		PRINT_TRACE("Playing " << noteFreq << "Hz for " << noteLength << " ms.");
 		Beep(noteFreq, noteLength);
 	}
 }
