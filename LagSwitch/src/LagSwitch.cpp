@@ -22,7 +22,7 @@
 // How many milliseconds the sender loop should sleep between checks.
 #define SENDER_SLEEP_MS 10
 // The expected maximum packet length.
-#define MAX_PACKET_LENGTH 10
+#define MAX_PACKET_LENGTH 1500
 
 #ifdef DEBUG_DST_IP
 #define SET_FILTER(x) (std::string("outbound and remoteAddr == ") + std::string(DEBUG_DST_IP))
