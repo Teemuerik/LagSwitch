@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 #include <chrono>
+#include <future>
 #include <thread>
 #include <mutex>
 #include <vector>
@@ -9,51 +10,8 @@
 #include <Windows.h>
 #include "windivert.h"
 
-// The test IP is the IP of https://www.google.com/
-#define DEBUG_DST_IP "142.250.184.238"
-// 10 ping requests without delayer:
-/*
-Pinging 142.250.184.238 with 32 bytes of data:
-Reply from 142.250.184.238: bytes=32 time=39ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=29ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=33ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=28ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=33ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=30ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=32ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=29ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=30ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=32ms TTL=114
-
-Ping statistics for 142.250.184.238:
-	Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
-Approximate round trip times in milli-seconds:
-	Minimum = 28ms, Maximum = 39ms, Average = 31ms
-*/
-// 10 ping requests with delayer:
-/*
-Pinging 142.250.184.238 with 32 bytes of data:
-Reply from 142.250.184.238: bytes=32 time=280ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=295ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=294ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=294ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=293ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=296ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=296ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=286ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=298ms TTL=114
-Reply from 142.250.184.238: bytes=32 time=293ms TTL=114
-
-Ping statistics for 142.250.184.238:
-	Packets: Sent = 10, Received = 10, Lost = 0 (0% loss),
-Approximate round trip times in milli-seconds:
-	Minimum = 280ms, Maximum = 298ms, Average = 292ms
-*/
-// Target latency           = 250ms
-// Sender thread sleep time = 10ms
-// Average latency          = 261ms
-// Maximum latency          = 270ms
-// Minimum latency          = 241ms
+// The test IP.
+// #define DEBUG_DST_IP "192.168.2.1"
 
 #define LOG_THREAD_ACTIVITY 0
 
@@ -64,7 +22,7 @@ Approximate round trip times in milli-seconds:
 // How many milliseconds the sender loop should sleep between checks.
 #define SENDER_SLEEP_MS 10
 // The expected maximum packet length.
-#define MAX_PACKET_LENGTH 1500
+#define MAX_PACKET_LENGTH 10
 
 #ifdef DEBUG_DST_IP
 #define SET_FILTER(x) (std::string("outbound and remoteAddr == ") + std::string(DEBUG_DST_IP))
@@ -240,10 +198,14 @@ private:
 	bool _shouldDeactivate = false;
 	std::mutex _activationStateMutex;
 
-	unsigned int _receivedCount;
-	int _bufferedCount;
+	size_t _receivedCount;
+	size_t _totalReceived;
+
+	size_t _totalDropped;
 
 	void _receiverLoop() {
+		static bool recalibrating = false;
+		static UINT oldSize = MAX_PACKET_LENGTH;
 		PRINT_TRACE("Receiver loop started...");
 		UINT currentSize = MAX_PACKET_LENGTH;
 		PVOID currentPacket;
@@ -277,17 +239,31 @@ private:
 				&received,
 				currentAddress
 			);
+			if (recalibrating)
+				PRINT_INFO("Tried to get packet with a buffer size of " << currentSize << " bytes...");
 			// Check for errors.
 			if (!success) {
+				// Add this packet to the dropped count.
+				{
+					std::lock_guard<std::mutex> lock(_packetMutex);
+					_totalDropped += 1;
+				}
 				DWORD error = GetLastError();
 				// If the last error was ERROR_INSUFFICIENT_BUFFER,
 				// set the current packet size to the received size and try again.
 				if (error == ERROR_INSUFFICIENT_BUFFER) {
-					PRINT_INFO("Recalibrated packet size:\nOld size: " << currentSize << "\nNew size: " << received);
-					currentSize = received;
+					if (!recalibrating) {
+						PRINT_INFO("Recalibrating packet size...");
+						oldSize = currentSize;
+						recalibrating = true;
+					}
+					currentSize *= 2;
+					PRINT_TRACE("Changed packet size to " << currentSize << " bytes.");
 					// Delete the old packet and address heap objects.
 					delete currentPacket;
 					delete currentAddress;
+					// Try again.
+					continue;
 				}
 				// Else if the error was ERROR_NO_DATA, close this thread and print the error.
 				else if (error == ERROR_NO_DATA) {
@@ -300,6 +276,11 @@ private:
 				}
 			}
 			RECV_TRACE("Received a packet successfully.");
+			if (recalibrating) {
+				PRINT_INFO("Recalibrated packet size:\nOld size: " << oldSize << "\nNew size: " << received);
+				currentSize = received;
+				recalibrating = false;
+			}
 			// Add the received packet to the packet list and increment the received packet counter.
 			std::lock_guard<std::mutex> lock(_packetMutex);
 			_packets.emplace_back(
@@ -307,12 +288,13 @@ private:
 				std::chrono::steady_clock::now()
 			);
 			_receivedCount += 1;
-			_bufferedCount += 1;
+			_totalReceived += 1;
 			RECV_TRACE("Added the packet to the send buffer and updated packet counts.");
 		}
 	}
 
-	unsigned int _sentCount;
+	size_t _sentCount;
+	size_t _totalSent;
 
 	void _senderLoop() {
 		PRINT_TRACE("Sender loop started...");
@@ -338,6 +320,7 @@ private:
 					
 					// Check errors.
 					if (!success) {
+						_totalDropped += 1;
 						DWORD error = GetLastError();
 
 						if (error = ERROR_INVALID_PARAMETER) {
@@ -358,7 +341,7 @@ private:
 
 					// Update the packet counters.
 					_sentCount += 1;
-					_bufferedCount -= 1;
+					_totalSent += 1;
 
 					SEND_TRACE("Packet data deleted and packet counters updated.");
 				}
@@ -404,13 +387,15 @@ private:
 
 	// Logs information every second when the delayer is active.
 	void _loggingLoop() {
+		static unsigned long prevDropped = 0;
 		PRINT_TRACE("Logging loop started...");
 		// The amount of received packets.
 		unsigned int received;
 		// The amount of sent packets.
 		unsigned int sent;
 		// The amount of packets in the buffer waiting to be sent.
-		unsigned int buffered;
+		size_t buffered;
+		size_t dropped;
 		while (true) {
 			{
 				{
@@ -420,23 +405,18 @@ private:
 					_receivedCount = 0;
 					sent = _sentCount;
 					_sentCount = 0;
-					buffered = _bufferedCount;
-					_bufferedCount = 0;
+					buffered = _packets.size();
+					dropped = _totalReceived - _totalSent - buffered - prevDropped + _totalDropped;
+					prevDropped += dropped;
+					// PRINT_INFO("total recv: " << _totalReceived << ", total sent: " << _totalSent << ", total dropped: " << _totalDropped << ", prev dropped: " << prevDropped);
 				}
 
 				// Log the data.
 				// In a normal situation, received = sent + buffered.
-				if (received == sent + buffered)
+				if (dropped == 0)
 					PRINT_INFO("Received: " << received << ", sent: " << sent << ", buffered: " << buffered << ".");
-
-				// If packets were lost, the received count is greater than the sent and buffer counts combined.
-				else if (received > sent + buffered) {
-					PRINT_ERROR("Packets lost: " << received - sent - buffered << "! Received: " << received << ", sent: " << sent << ", buffered: " << buffered << ".");
-				}
-
-				// Other abnormal cases.
 				else {
-					PRINT_ERROR("Abnormal values! Received: " << received << ", sent: " << sent << ", buffered: " << buffered << ".");
+					PRINT_ERROR("Dropped: " << dropped << "! Received: " << received << ", sent: " << sent << ", buffered: " << buffered << ".");
 				}
 			}
 			// Wait for a second between logs.
@@ -467,7 +447,15 @@ private:
 			std::lock_guard<std::mutex> lock(_activationStateMutex);
 			_shouldDeactivate = true;
 		}
-		PRINT_TRACE("Deactivation flag set successfully, joining threads...");
+		PRINT_TRACE("Deactivation flag set successfully.");
+		PRINT_TRACE("Shutting down the WinDivert handle.");
+		bool success = WinDivertShutdown(_winDivertHandle, WINDIVERT_SHUTDOWN_RECV);
+		// If there was an error, show it.
+		if (!success) {
+			DWORD error = GetLastError();
+			PRINT_ERROR("WinDivertShutdown() failed with error code " << error << ".");
+		}
+		PRINT_TRACE("Joining threads...");
 		// Wait for the receiver, sender, and logger threads to close.
 		_receiverThread.join();
 		PRINT_TRACE("Receiver thread joined.");
@@ -475,6 +463,8 @@ private:
 		PRINT_TRACE("Sender thread joined.");
 		_loggerThread.join();
 		PRINT_TRACE("Logger thread joined.");
+		PRINT_TRACE("Resetting the deactivation flag.");
+		_shouldDeactivate = false;
 		PRINT_TRACE("Threads closed successfully.");
 	}
 
@@ -486,8 +476,9 @@ public:
 	void Init(int port, long long latency) {
 		PRINT_TRACE("Initializing the delayer with port " << port << " and latency of " << latency << " ms.");
 		_receivedCount = 0;
-		_bufferedCount = 0;
+		_totalReceived = 0;
 		_sentCount = 0;
+		_totalSent = 0;
 		_latency = std::chrono::milliseconds(latency);
 		_active = false;
 		// Create a filter that accepts outbound packets from the given local port.
@@ -550,6 +541,7 @@ public:
 
 		PRINT_INFO("Delayer activated.");
 
+		_active = true;
 		return true;
 	}
 
@@ -561,7 +553,7 @@ public:
 		}
 
 		// Check that the delayer isn't already deactivated.
-		if (_active) {
+		if (!_active) {
 			SYNC_COUT("The delayer is already deactivated.");
 			return false;
 		}
@@ -585,7 +577,12 @@ public:
 
 		PRINT_INFO("Delayer deactivated.");
 
+		_active = false;
 		return true;
+	}
+
+	bool IsActive() {
+		return _active;
 	}
 };
 
@@ -593,42 +590,42 @@ Delayer delayer;
 
 #define INPUT_SLEEP_TIME std::chrono::milliseconds(INPUT_SLEEP_MS)
 
+bool shouldClose = false;
+std::mutex closingMutex;
+
+bool ShouldClose() {
+	std::lock_guard<std::mutex> lock(closingMutex);
+	return shouldClose;
+}
+
+void Close() {
+	std::lock_guard<std::mutex> lock(closingMutex);
+	shouldClose = true;
+}
+
 namespace ShortcutWaiter {
 	// This should return true if the shortcut to activate the delayer is pressed.
-	bool ShouldActivate() {
-		return (GetKeyState('A') & 0x8000) && (GetKeyState('J') & 0x8000) && (GetKeyState('S') & 0x8000);
-	}
-	// This should return true if the shortcut to deactivate the delayer is pressed.
-	bool ShouldDeactivate() {
-		return (GetKeyState('A') & 0x8000) && (GetKeyState('J') & 0x8000) && (GetKeyState('D') & 0x8000);
+	bool TogglePressed() {
+		return GetKeyState(VK_F8) & 0x8000;
 	}
 
-	bool ShouldActivateWrapper() {
+	bool ShouldToggle() {
 		static bool lastState = false;
-		bool currentState = ShouldActivate();
+		bool currentState = TogglePressed();
 		if (currentState == lastState)
 			return false;
+		PRINT_TRACE("Toggle key state changed to " << currentState << ".");
 		lastState = currentState;
-		if (currentState)
-			return true;
-		return false;
-	}
-	bool ShouldDeactivateWrapper() {
-		static bool lastState = false;
-		bool currentState = ShouldDeactivate();
-		if (currentState == lastState)
-			return false;
-		lastState = currentState;
-		if (currentState)
-			return true;
-		return false;
+		return currentState;
 	}
 
 	void TestShortcuts() {
-		if (ShouldActivateWrapper())
-			delayer.Activate();
-		else if (ShouldDeactivate())
-			delayer.Deactivate();
+		if (ShouldToggle()) {
+			if (delayer.IsActive())
+				delayer.Deactivate();
+			else
+				delayer.Activate();
+		}
 	}
 
 	void ShortcutLoop() {
@@ -636,6 +633,12 @@ namespace ShortcutWaiter {
 		while (true) {
 			// Test whether or not one of the shortcuts is being pressed.
 			TestShortcuts();
+			// Check if the application should close.
+			if (ShouldClose()) {
+				// If it should, close this thread.
+				PRINT_TRACE("Closing the keyboard monitoring thread.");
+				return;
+			}
 			// Sleep for the input sleep time between checks.
 			std::this_thread::sleep_for(INPUT_SLEEP_TIME);
 		}
@@ -677,19 +680,165 @@ long long PromptPositiveNum(const char * message) {
 	return input;
 }
 
+// The twelve notes: C, C#, D, D#, E, F, F#, G, G#, A, A#, and B.
+enum class Note : int {
+	C      = -9,
+	CSharp = -8, DFlat = -8,
+	D      = -7,
+	DSharp = -6, EFlat = -6,
+	E      = -5,
+	F      = -4,
+	FSharp = -3, GFlat = -3,
+	G      = -2,
+	GSharp = -1, AFlat = -1,
+	A      = 0,
+	ASharp = 1,  BFlat = 1,
+	B      = 2,
+	Rest   = 13
+};
+
+DWORD GetNote(Note note, int octave) {
+	// Using A4 to calculate all notes.
+	static const double A4Freq = 440.0; // Hertz.
+	// The interval in the geometric series of semitones is the twelfth root of 2.
+	static const double interval = pow((double)2.0, (double)1.0 / 12);
+	// The distance in semitones to the note from A4.
+	int A4Dist = (octave - 4) * 12 + (int)note;
+	if (A4Dist == 0)
+		return (DWORD)A4Freq;
+	// Calculate and return the resulting pitch as an integer.
+	return (DWORD)(A4Freq * pow(interval, A4Dist));
+}
+
+int tempo = 60; // BPM.
+// The length of a quarter note in milliseconds.
+double quarterNote = (double)1000.0 * 60 / tempo;
+
+void BeepNote(Note note, int octave, double division) {
+	DWORD noteLength = (DWORD)(quarterNote * 4 / division);
+	if (note == Note::Rest) {
+		PRINT_TRACE("Resting for " << noteLength << " ms.");
+		std::this_thread::sleep_for(std::chrono::milliseconds(noteLength));
+	}
+	else {
+		DWORD noteFreq = GetNote(note, octave);
+		PRINT_TRACE("Playing " << noteFreq << " for " << noteLength << " ms.");
+		Beep(noteFreq, noteLength);
+	}
+}
+
+void PlayMegalovania() {
+	BeepNote(Note::D, 4, 16);
+	BeepNote(Note::D, 4, 16);
+	BeepNote(Note::D, 5, 8);
+	BeepNote(Note::A, 4, 8);
+	BeepNote(Note::Rest, 0, 16);
+	BeepNote(Note::AFlat, 4, 8);
+	BeepNote(Note::G, 4, 8);
+	BeepNote(Note::F, 4, 8);
+	BeepNote(Note::D, 4, 16);
+	BeepNote(Note::F, 4, 16);
+	BeepNote(Note::G, 4, 16);
+
+	BeepNote(Note::C, 4, 16);
+	BeepNote(Note::C, 4, 16);
+	BeepNote(Note::D, 5, 8);
+	BeepNote(Note::A, 4, 8);
+	BeepNote(Note::Rest, 0, 16);
+	BeepNote(Note::AFlat, 4, 8);
+	BeepNote(Note::G, 4, 8);
+	BeepNote(Note::F, 4, 8);
+	BeepNote(Note::D, 4, 16);
+	BeepNote(Note::F, 4, 16);
+	BeepNote(Note::G, 4, 16);
+
+	BeepNote(Note::B, 3, 16);
+	BeepNote(Note::B, 3, 16);
+	BeepNote(Note::D, 5, 8);
+	BeepNote(Note::A, 4, 8);
+	BeepNote(Note::Rest, 0, 16);
+	BeepNote(Note::AFlat, 4, 8);
+	BeepNote(Note::G, 4, 8);
+	BeepNote(Note::F, 4, 8);
+	BeepNote(Note::D, 4, 16);
+	BeepNote(Note::F, 4, 16);
+	BeepNote(Note::G, 4, 16);
+
+	BeepNote(Note::BFlat, 3, 16);
+	BeepNote(Note::BFlat, 3, 16);
+	BeepNote(Note::D, 5, 8);
+	BeepNote(Note::A, 4, 8);
+	BeepNote(Note::Rest, 0, 16);
+	BeepNote(Note::AFlat, 4, 8);
+	BeepNote(Note::G, 4, 8);
+	BeepNote(Note::F, 4, 8);
+	BeepNote(Note::D, 4, 16);
+	BeepNote(Note::F, 4, 16);
+	BeepNote(Note::G, 4, 16);
+
+	BeepNote(Note::D, 4, 4);
+}
+
+bool handleCloses = false;
+
+BOOL WINAPI CtrlHandler(DWORD fwdCtrlType) {
+	switch (fwdCtrlType) {
+	case CTRL_C_EVENT:
+		PRINT_TRACE("Received Ctrl + C event with handleCloses set to " << handleCloses << ", closing threads...");
+		Close();
+		return handleCloses;
+	case CTRL_CLOSE_EVENT:
+		PRINT_TRACE("Received close event with handleCloses set to " << handleCloses << ", closing threads...");
+		Close();
+		return handleCloses;
+	case CTRL_BREAK_EVENT:
+		PlayMegalovania();
+		return true;
+	default:
+		return false;
+	}
+}
+
 int main() {
 	// Prompt the user for the port(s).
 	int port = (int)PromptPositiveNum("Please enter the port the application uses to send network packets: ");
 	long long latency = PromptPositiveNum("Please enter the desired latency (ms): ");
 
+	// Register the control handler.
+	if (SetConsoleCtrlHandler(CtrlHandler, TRUE))
+		PRINT_TRACE("The control handler was registered.");
+	else {
+		PRINT_ERROR("Could not set control handler.");
+		return EXIT_FAILURE;
+	}
+
 	// Initialize the delayer with the given port.
 	delayer.Init(port, latency);
 
-	// Create the shortcut checker thread.
-	PRINT_TRACE("Starting the keybind checker thread.");
-	std::thread shortcutThread(ShortcutWaiter::ShortcutLoop);
+	std::promise<bool> promise;
+	std::future<bool> future = promise.get_future();
 
-	PRINT_TRACE("Blocked main thread until the keyboard checker returns.");
-	// Wait for the thread to finish.
-	shortcutThread.join();
+	// Create the keyboard checker thread.
+	PRINT_TRACE("Starting the keyboard checker thread.");
+	std::thread shortcutThread([&promise] {
+		ShortcutWaiter::ShortcutLoop();
+		promise.set_value(true);
+	});
+
+	handleCloses = true;
+
+	PRINT_TRACE("Looping main thread until the keyboard checker returns.");
+	// Wait for the keyboard checker thread to finish.
+	while (true) {
+		std::future_status status = future.wait_for(std::chrono::milliseconds(0));
+		if (status == std::future_status::ready) {
+			PRINT_TRACE("Keyboard checker thread finished, joining...");
+			shortcutThread.join();
+			break;
+		}
+	}
+
+	SYNC_COUT("The application is closing...");
+
+	return EXIT_SUCCESS;
 }
